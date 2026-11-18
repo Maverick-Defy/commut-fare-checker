@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Commut Fare Checker</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <style>
 :root{--ink:#14213d;--muted:#5b6475;--line:#dfe3ea;--brand:#0b6e4f;--brand2:#e9f5f0;--warn:#fff6e0;--bg:#f5f7fa}
 *{box-sizing:border-box}
@@ -24,7 +26,7 @@ input[type=text],input[type=number]{width:100%;padding:11px;border:1px solid var
 .sugg .none{color:var(--muted);cursor:default}
 .picked{font-size:13px;color:var(--brand);margin-top:4px;word-break:break-word}
 .row{display:flex;gap:8px;align-items:flex-end}
-.row .field{flex:1}
+.row .field{flex:1;min-width:0}
 button{font:inherit;border:0;border-radius:8px;padding:11px 14px;cursor:pointer}
 .primary{background:var(--brand);color:#fff;font-weight:600;width:100%;margin-top:14px;font-size:16px}
 .primary:disabled{opacity:.6}
@@ -47,22 +49,39 @@ tr.tot td{font-weight:700;border-bottom:0}
 .msg{background:var(--warn);border:1px solid #f0dca0;border-radius:8px;padding:10px;font-size:14px;margin-top:10px;display:none}
 .note{font-size:13px;color:var(--muted)}
 .note li{margin-bottom:4px}
+.picked.warn{color:#8a5a00;background:var(--warn);border:1px solid #f0dca0;border-radius:8px;padding:8px}
+.pin{background:var(--brand2);color:var(--brand);font-weight:600;white-space:nowrap;padding:11px 10px}
+input.active{border-color:var(--brand);box-shadow:0 0 0 2px var(--brand2)}
+#map{height:340px;border-radius:10px;border:1px solid var(--line);margin-top:8px;z-index:0}
+@media(max-width:480px){#map{height:300px}}
+.targets{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.targets button{background:#eef0f4;color:var(--ink);padding:8px 10px;font-size:14px}
+.targets button.on{background:var(--brand);color:#fff;font-weight:600}
+.mk{width:28px;height:28px;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.45);color:#fff;font-weight:700;font-size:14px;line-height:24px;text-align:center}
 </style>
 </head>
 <body>
 <header>
   <h1>Commut Fare Checker</h1>
-  <p>Type a pickup point and a destination. Get the driving km and the per-seat fare.</p>
+  <p>Type a place, paste a Google Maps link or coordinates, or tap the map. Get the driving km and the per-seat fare.</p>
 </header>
 <main>
   <div class="card">
     <h2>Trip</h2>
     <label for="dest">Destination (the event or venue)</label>
-    <div class="field"><input type="text" id="dest" placeholder="e.g. Shiro Lagos" autocomplete="off"><div class="sugg" id="sugg-dest"></div></div>
+    <div class="row"><div class="field"><input type="text" id="dest" placeholder="e.g. Shiro Lagos, or paste coordinates or a Google Maps link" autocomplete="off"><div class="sugg" id="sugg-dest"></div></div><button class="pin" id="pin-dest" type="button" title="Set this point on the map">Map</button></div>
     <div class="picked" id="picked-dest"></div>
     <div id="pickups"></div>
     <button class="ghost" id="addPickup" style="margin-top:12px">+ Add another pickup point</button>
     <div class="chk"><input type="checkbox" id="ret"><label for="ret" style="margin:0;color:var(--ink);font-size:15px">Return trip too (destination back to each pickup, routed separately)</label></div>
+  </div>
+
+  <div class="card">
+    <h2>Map</h2>
+    <div class="note" id="mapHint">Choose a field below, then tap the map to set that point. Drag a marker to move it.</div>
+    <div class="targets" id="targets"></div>
+    <div id="map"></div>
+    <div class="note" id="mapFail" style="display:none">The map could not load. You can still type places or paste coordinates above.</div>
   </div>
 
   <div class="card">
@@ -89,15 +108,22 @@ tr.tot td{font-weight:700;border-bottom:0}
     <ul style="margin:0;padding-left:18px">
       <li>Distances are road distances without traffic.</li>
       <li>Prices are a draft model pending validation.</li>
-      <li>Place search and routing use free public map services (OpenStreetMap Nominatim, Photon and OSRM). Please use lightly and internally only.</li>
+      <li>Place search, the map and routing use free public map services (OpenStreetMap Nominatim, Photon, OpenStreetMap tiles and OSRM). Please use lightly and internally only. Search waits a moment after you stop typing, on purpose.</li>
+      <li>You can paste coordinates (like 6.4281, 3.4219), a Google Maps link that shows coordinates, or a plus code. Short links such as maps.app.goo.gl cannot be opened from this page.</li>
       <li>Formula: journey cost = allowance + km x rate. Base fare = journey cost ÷ seats. Fee = base x fee %. VAT = fee x VAT %. Total = base + fee + VAT, rounded to whole naira.</li>
     </ul>
   </div>
 </main>
 
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script>
+/* ===== SETTINGS ===== */
+// Optional. Paste a Google Maps API key between the quotes to use Google Places suggestions. Leave empty to use OpenStreetMap search.
+var GOOGLE_MAPS_API_KEY = '';
+
 /* ===== CORE LOGIC (tested with node) ===== */
 //CORE_START
+var LAGOS = {lat:6.5244, lon:3.3792, west:2.70, east:4.35, south:6.35, north:6.75};
 function computeFare(km, p){
   var journey = p.allowance + km * p.rate;
   var base = journey / p.seats;
@@ -110,29 +136,130 @@ function naira(n, dp){
   var d = dp === undefined ? 0 : dp;
   return '\u20A6' + Number(n).toLocaleString('en-NG',{minimumFractionDigits:d,maximumFractionDigits:d});
 }
+// Nominatim: Nigeria only, Lagos box preferred (bounded=0 keeps nearby places such as Ogun State)
 function nominatimUrl(q){
-  return 'https://nominatim.openstreetmap.org/search?format=json&countrycodes=ng&limit=6&viewbox=2.70,6.80,4.40,6.25&q=' + encodeURIComponent(q);
+  return 'https://nominatim.openstreetmap.org/search?format=json&countrycodes=ng&limit=8&bounded=0&viewbox=' +
+    LAGOS.west + ',' + LAGOS.north + ',' + LAGOS.east + ',' + LAGOS.south + '&q=' + encodeURIComponent(q);
 }
+function nominatimReverseUrl(lat, lon){
+  return 'https://nominatim.openstreetmap.org/reverse?format=json&zoom=18&lat=' + lat + '&lon=' + lon;
+}
+// Photon: biased towards Lagos; results are also filtered to Nigeria in the app
 function photonUrl(q){
-  return 'https://photon.komoot.io/api/?limit=6&lat=6.5244&lon=3.3792&q=' + encodeURIComponent(q);
+  return 'https://photon.komoot.io/api/?limit=8&lat=' + LAGOS.lat + '&lon=' + LAGOS.lon + '&zoom=10&location_bias_scale=0.5&q=' + encodeURIComponent(q);
 }
-function osrmUrl(points){
+function osrmUrl(points, withGeometry){
   var s = points.map(function(c){return c.lon + ',' + c.lat;}).join(';');
-  return 'https://router.project-osrm.org/route/v1/driving/' + s + '?overview=false';
+  return 'https://router.project-osrm.org/route/v1/driving/' + s + (withGeometry ? '?overview=full&geometries=geojson' : '?overview=false');
+}
+function inLagosBox(lat, lon){
+  return lon >= LAGOS.west && lon <= LAGOS.east && lat >= LAGOS.south && lat <= LAGOS.north;
+}
+function lagosFirst(items){
+  var a = items.filter(function(x){return inLagosBox(x.lat, x.lon);});
+  var b = items.filter(function(x){return !inLagosBox(x.lat, x.lon);});
+  return a.concat(b);
+}
+
+/* ---- pasted locations: coordinates, Google Maps links, plus codes ---- */
+var OLC_ALPHA = '23456789CFGHJMPQRVWX';
+var OLC_W = [160000, 8000, 400, 20, 1]; // size of each digit pair, in 1/8000 of a degree
+function olcDecodeFull(code){
+  var c = code.toUpperCase().replace('+','').replace(/0+$/,'');
+  var latU = 0, lonU = 0, n = Math.min(c.length, 10), last = 0;
+  n -= n % 2;
+  if(n < 2) return null;
+  for(var i = 0; i < n; i += 2){
+    var a = OLC_ALPHA.indexOf(c[i]), b = OLC_ALPHA.indexOf(c[i+1]);
+    if(a < 0 || b < 0) return null;
+    latU += a * OLC_W[i/2]; lonU += b * OLC_W[i/2]; last = OLC_W[i/2];
+  }
+  var lat = -90 + (latU + last/2) / 8000, lon = -180 + (lonU + last/2) / 8000;
+  if(!isFinite(lat) || !isFinite(lon) || lat > 90 || lon > 180) return null;
+  return {lat:lat, lon:lon};
+}
+function olcEncode8(lat, lon){
+  var la = Math.floor((lat + 90) * 400), lo = Math.floor((lon + 180) * 400);
+  var d = function(u){return [Math.floor(u/8000), Math.floor(u/400)%20, Math.floor(u/20)%20, u%20];};
+  var A = d(la), B = d(lo), s = '';
+  for(var i = 0; i < 4; i++) s += OLC_ALPHA[A[i]] + OLC_ALPHA[B[i]];
+  return s;
+}
+function olcDecode(text, refLat, refLon){
+  var m = text.trim().toUpperCase().match(/^([23456789CFGHJMPQRVWX0]{2,8})\+([23456789CFGHJMPQRVWX]*)(?:\s+.*)?$/);
+  if(!m) return null;
+  var head = m[1], tail = m[2];
+  if(head.length === 8){ return olcDecodeFull(head + '+' + tail); }
+  if(head.length % 2 !== 0 || head.length < 2 || tail.length < 2 || head.indexOf('0') >= 0) return null;
+  var prefixLen = 8 - head.length;
+  var full = olcEncode8(refLat, refLon).slice(0, prefixLen) + head + '+' + tail;
+  var r = olcDecodeFull(full);
+  if(!r) return null;
+  var res = prefixLen === 2 ? 20 : prefixLen === 4 ? 1 : 0.05;
+  if(r.lat > refLat + res/2) r.lat -= res; else if(r.lat < refLat - res/2) r.lat += res;
+  if(r.lon > refLon + res/2) r.lon -= res; else if(r.lon < refLon - res/2) r.lon += res;
+  return r;
+}
+function validLatLon(lat, lon){
+  return isFinite(lat) && isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+}
+var SHORT_LINK_MSG = 'That is a short Google Maps link, and this page cannot open it. Open the link in your browser, then copy either the coordinates (in Google Maps, press and hold the pin, then copy the numbers) or the full web address from the address bar, and paste that here.';
+var NO_COORD_MSG = 'That link has no coordinates in it. Open it in Google Maps, wait for the pin to show, then copy the full web address from the address bar (it should contain numbers like @6.4281,3.4219) and paste that here. Or press and hold the pin and copy the coordinates.';
+// Returns {lat,lon,type} when text holds a location, {error:'short'|'nocoords',message} for links we cannot use, or null for ordinary search text.
+function parseLocationInput(text){
+  var t = (text || '').trim();
+  if(!t) return null;
+  var isUrl = /^(https?:\/\/|www\.)/i.test(t) || /(^|[\s\/])(maps\.google\.|google\.[a-z.]+\/maps|goo\.gl|maps\.app\.goo\.gl|g\.co\/kgs|g\.page)/i.test(t);
+  if(isUrl){
+    if(/(^|[\/\s])(maps\.app\.goo\.gl|goo\.gl|g\.co\/kgs|g\.page)(\/|$)/i.test(t)) return {error:'short', message:SHORT_LINK_MSG};
+    var u = t; try{ u = decodeURIComponent(t); }catch(e){}
+    var num = '(-?\\d{1,3}(?:\\.\\d+)?)', pair = num + '\\s*,\\s*' + num;
+    var pats = [
+      new RegExp('!3d' + num + '!4d' + num),
+      new RegExp('@' + pair),
+      new RegExp('[?&](?:q|query|ll|destination|daddr|saddr|center|viewpoint)=\\s*\\+?' + pair),
+      new RegExp('/place/\\s*' + pair)
+    ];
+    for(var i = 0; i < pats.length; i++){
+      var m = u.match(pats[i]);
+      if(m){ var la = parseFloat(m[1]), lo = parseFloat(m[2]); if(validLatLon(la, lo)) return {lat:la, lon:lo, type:'link'}; }
+    }
+    return {error:'nocoords', message:NO_COORD_MSG};
+  }
+  var oc = olcDecode(t, LAGOS.lat, LAGOS.lon);
+  if(oc) return {lat:oc.lat, lon:oc.lon, type:'pluscode'};
+  var c = t.replace(/\b(lat(itude)?|lng|lon(gitude)?)\b/ig,' ').replace(/[:=()\u00B0]/g,' ').replace(/\s+/g,' ').trim();
+  var r = c.match(/^([+-]?\d{1,2}(?:\.\d+)?)\s*[,;\s]\s*([+-]?\d{1,3}(?:\.\d+)?)$/);
+  if(r && (r[1].indexOf('.') >= 0 || r[2].indexOf('.') >= 0)){
+    var la2 = parseFloat(r[1]), lo2 = parseFloat(r[2]);
+    if(validLatLon(la2, lo2)) return {lat:la2, lon:lo2, type:'coords'};
+  }
+  return null;
 }
 //CORE_END
 
 /* ===== APP ===== */
 var MAX_PICKUPS = 4;
-var state = {dest:null, pickups:[]}; // pickups: {el, input, picked, sugg, place}
+var NOMINATIM_GAP_MS = 1100;   // never more than one OpenStreetMap lookup per 1.1 seconds
+var DEBOUNCE_MS = 1100;        // wait this long after typing stops before searching (OpenStreetMap search)
+var GOOGLE_DEBOUNCE_MS = 300;  // Google suggestions can be quicker
+var COLORS = ['#c0392b','#0b6e4f','#1f6fb5','#d9822b','#7b3fa0'];
+var fields = [];               // [destination, pickup 1, pickup 2, ...]
+var state = {pickups:[]};
+var activeField = null;
 var lastNom = 0;
+var searchCache = {};
 
 function sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
 var nomQueue = Promise.resolve();
-function throttled(fn){
+function throttled(fn, stale){
   var run = nomQueue.then(function(){
-    var wait = Math.max(0, lastNom + 1100 - Date.now());
-    return sleep(wait).then(function(){lastNom = Date.now(); return fn();});
+    if(stale && stale()) return null;
+    var wait = Math.max(0, lastNom + NOMINATIM_GAP_MS - Date.now());
+    return sleep(wait).then(function(){
+      if(stale && stale()) return null;
+      lastNom = Date.now(); return fn();
+    });
   });
   nomQueue = run.catch(function(){});
   return run;
@@ -143,89 +270,320 @@ function fetchJson(url){
     return r.json();
   });
 }
-function searchPlaces(q){
+
+/* ---- place search: Nominatim, then Photon; or Google when a key is set ---- */
+function searchNominatim(q, stale){
   return throttled(function(){
     return fetchJson(nominatimUrl(q)).then(function(a){
       return a.map(function(x){return {name:x.display_name, lat:parseFloat(x.lat), lon:parseFloat(x.lon)};});
     });
-  }).catch(function(){
-    return throttled(function(){
-      return fetchJson(photonUrl(q)).then(function(j){
-        return j.features.filter(function(f){return f.properties.countrycode === 'NG';}).map(function(f){
-          var p = f.properties;
-          var parts = [p.name, p.street, p.district, p.city, p.county, p.state].filter(function(v,i,a){return v && a.indexOf(v) === i;});
-          return {name:parts.join(', '), lat:f.geometry.coordinates[1], lon:f.geometry.coordinates[0]};
-        });
+  }, stale);
+}
+function searchPhoton(q, stale){
+  return throttled(function(){
+    return fetchJson(photonUrl(q)).then(function(j){
+      return j.features.filter(function(f){return f.properties.countrycode === 'NG';}).map(function(f){
+        var p = f.properties;
+        var parts = [p.name, p.street, p.district, p.city, p.county, p.state].filter(function(v,i,a){return v && a.indexOf(v) === i;});
+        return {name:parts.join(', '), lat:f.geometry.coordinates[1], lon:f.geometry.coordinates[0]};
       });
+    });
+  }, stale);
+}
+function searchOpenMaps(q, stale){
+  var key = q.toLowerCase();
+  if(searchCache[key]) return Promise.resolve(searchCache[key]);
+  return searchNominatim(q, stale).then(function(items){
+    return (items === null || items.length) ? items : searchPhoton(q, stale);
+  }, function(){
+    return searchPhoton(q, stale);
+  }).then(function(items){
+    if(items){ items = lagosFirst(items); searchCache[key] = items; }
+    return items;
+  });
+}
+
+/* Google Places (optional). Only used when GOOGLE_MAPS_API_KEY is filled in. */
+var googleState = {loading:null, failed:false};
+function useGoogle(){return !!GOOGLE_MAPS_API_KEY && !googleState.failed;}
+function loadGoogle(){
+  if(googleState.loading) return googleState.loading;
+  googleState.loading = new Promise(function(resolve, reject){
+    window.__commutGoogleReady = function(){google.maps.importLibrary('places').then(resolve, reject);};
+    window.gm_authFailure = function(){googleState.failed = true; console.warn('Google Maps key was rejected. Falling back to OpenStreetMap search.');};
+    var sc = document.createElement('script');
+    sc.async = true;
+    sc.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(GOOGLE_MAPS_API_KEY) + '&loading=async&v=weekly&callback=__commutGoogleReady';
+    sc.onerror = function(){reject(new Error('Google Maps could not load'));};
+    document.head.appendChild(sc);
+  });
+  googleState.loading.catch(function(){googleState.failed = true;});
+  return googleState.loading;
+}
+function searchGoogle(q, field){
+  return loadGoogle().then(function(lib){
+    if(!field.token) field.token = new lib.AutocompleteSessionToken();
+    return lib.AutocompleteSuggestion.fetchAutocompleteSuggestions({
+      input: q,
+      sessionToken: field.token,
+      includedRegionCodes: ['ng'],
+      region: 'ng',
+      language: 'en',
+      locationBias: {center:{lat:LAGOS.lat, lng:LAGOS.lon}, radius:50000}
+    });
+  }).then(function(r){
+    return r.suggestions.filter(function(s){return s.placePrediction;}).map(function(s){
+      var pp = s.placePrediction;
+      return {name:pp.text.toString(), resolve:function(){
+        var pl = pp.toPlace();
+        return pl.fetchFields({fields:['location','formattedAddress','displayName']}).then(function(){
+          field.token = null;
+          var nm = pl.displayName && pl.formattedAddress && pl.formattedAddress.indexOf(pl.displayName) !== 0 ? pl.displayName + ', ' + pl.formattedAddress : (pl.formattedAddress || pl.displayName || pp.text.toString());
+          return {name:nm, lat:pl.location.lat(), lon:pl.location.lng()};
+        });
+      }};
     });
   });
 }
+function searchPlaces(q, field, stale){
+  if(useGoogle()){
+    return searchGoogle(q, field).catch(function(e){
+      console.warn('Google suggestions failed, using OpenStreetMap instead:', e && e.message);
+      googleState.failed = true;
+      return searchOpenMaps(q, stale);
+    });
+  }
+  return searchOpenMaps(q, stale);
+}
+function reverseLabel(lat, lon, stale){
+  return throttled(function(){
+    return fetchJson(nominatimReverseUrl(lat, lon)).then(function(j){
+      if(!j || !j.display_name) throw new Error('no label');
+      return j.display_name;
+    });
+  }, stale).catch(function(){return null;});
+}
+
+/* ---- routing (OSRM) ---- */
 function route(points){
   return fetchJson(osrmUrl(points)).then(function(j){
     if(j.code !== 'Ok' || !j.routes || !j.routes.length) throw new Error('No route found');
     return j.routes[0].distance / 1000;
   });
 }
+function routeWithLine(points){
+  return fetchJson(osrmUrl(points, true)).then(function(j){
+    if(j.code !== 'Ok' || !j.routes || !j.routes.length) throw new Error('No route found');
+    var rt = j.routes[0];
+    return {km:rt.distance / 1000, line:rt.geometry.coordinates.map(function(c){return [c[1], c[0]];})};
+  });
+}
 
-function makePlaceInput(inputEl, suggEl, pickedEl, onPick){
-  var timer = null, seq = 0, obj = {place:null};
+/* ---- map (Leaflet + OpenStreetMap tiles) ---- */
+var map = null, routeLayer = null, routeSeq = 0;
+function clearRoute(){
+  routeSeq++;
+  if(routeLayer && map){map.removeLayer(routeLayer);}
+  routeLayer = null;
+}
+function drawRoute(line, seq){
+  if(!map || seq !== routeSeq || !line || !line.length) return;
+  routeLayer = L.polyline(line, {color:'#0b6e4f', weight:5, opacity:0.8}).addTo(map);
+  map.fitBounds(routeLayer.getBounds(), {padding:[30,30]});
+}
+function markerIcon(txt, color){
+  return L.divIcon({className:'', html:'<div class="mk" style="background:' + color + '">' + txt + '</div>', iconSize:[28,28], iconAnchor:[14,14]});
+}
+function fitAll(){
+  if(!map) return;
+  var pts = fields.filter(function(f){return f.place;}).map(function(f){return [f.place.lat, f.place.lon];});
+  if(!pts.length) return;
+  if(pts.length === 1) map.setView(pts[0], 15);
+  else map.fitBounds(L.latLngBounds(pts), {padding:[40,40], maxZoom:16});
+}
+function syncMarkers(fit){
+  if(!map) return;
+  fields.forEach(function(f, i){
+    if(f.place){
+      var ll = [f.place.lat, f.place.lon], icon = markerIcon(f.kind === 'dest' ? 'D' : String(i), COLORS[i]);
+      if(!f.marker){
+        f.marker = L.marker(ll, {draggable:true, icon:icon, keyboard:false}).addTo(map);
+        f.marker.on('dragend', function(){var p = f.marker.getLatLng(); setPin(f, p.lat, p.lng, {fit:false});});
+        f.marker.on('click', function(){setActive(f);});
+      } else { f.marker.setLatLng(ll); f.marker.setIcon(icon); }
+    } else if(f.marker){ map.removeLayer(f.marker); f.marker = null; }
+  });
+  if(fit) fitAll();
+}
+function fieldLabel(f){return f.kind === 'dest' ? 'Destination' : 'Pickup ' + fields.indexOf(f);}
+function rebuildTargets(){
+  var box = document.getElementById('targets'); box.innerHTML = '';
+  fields.forEach(function(f){
+    var b = document.createElement('button'); b.type = 'button'; b.textContent = fieldLabel(f);
+    b.className = f === activeField ? 'on' : '';
+    b.addEventListener('click', function(){setActive(f);});
+    box.appendChild(b);
+  });
+  var h = document.getElementById('mapHint');
+  h.textContent = activeField ? 'Tap the map to set: ' + fieldLabel(activeField) + '. Drag a marker to move it.' : 'Choose a field, then tap the map to set that point.';
+}
+function setActive(f, scrollToMap){
+  activeField = f;
+  fields.forEach(function(x){x.input.classList.toggle('active', x === f);});
+  rebuildTargets();
+  if(scrollToMap){document.getElementById('map').scrollIntoView({behavior:'smooth', block:'center'});}
+}
+function nextEmptyAfter(f){
+  var i = fields.indexOf(f);
+  for(var k = 1; k < fields.length; k++){
+    var g = fields[(i + k) % fields.length];
+    if(!g.place) return g;
+  }
+  return f;
+}
+function initMap(){
+  if(typeof L === 'undefined'){
+    document.getElementById('map').style.display = 'none';
+    document.getElementById('mapFail').style.display = 'block';
+    return;
+  }
+  map = L.map('map').setView([LAGOS.lat, LAGOS.lon], 10);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  }).addTo(map);
+  map.on('click', function(e){
+    if(!activeField){return;}
+    var f = activeField;
+    setPin(f, e.latlng.lat, e.latlng.lng, {fit:false});
+    setActive(nextEmptyAfter(f));
+  });
+}
+
+/* ---- fields ---- */
+function shortName(n){return n.split(',').slice(0,2).join(',').trim();}
+function coordText(lat, lon){return lat.toFixed(5) + ', ' + lon.toFixed(5);}
+function setNote(f, text, warn){f.picked.textContent = text; f.picked.className = 'picked' + (warn ? ' warn' : '');}
+function describe(f){
+  var p = f.place, t = 'Selected: ' + p.name;
+  if(p.pin) t += ' (' + coordText(p.lat, p.lon) + ')';
+  if(!inLagosBox(p.lat, p.lon)) t += '. Note: this point is outside the Lagos area.';
+  setNote(f, t, false);
+}
+function applyPlace(f, place, o){
+  o = o || {};
+  f.place = place;
+  f.input.value = o.inputText || shortName(place.name);
+  describe(f);
+  clearRoute();
+  syncMarkers(o.fit !== false);
+}
+// Set an exact point (pasted, dropped or dragged) and look up a readable name for it
+function setPin(f, lat, lon, o){
+  var place = {name:'Pinned point (' + coordText(lat, lon) + ')', lat:lat, lon:lon, pin:true};
+  applyPlace(f, place, {inputText:coordText(lat, lon), fit:!o || o.fit !== false});
+  reverseLabel(lat, lon, function(){return f.place !== place;}).then(function(label){
+    if(f.place !== place) return;
+    if(label){place.name = label; f.input.value = shortName(label); describe(f);}
+    else {setNote(f, 'Selected: exact point ' + coordText(lat, lon) + ' (no street name found, coordinates will be used).', false);}
+  });
+}
+
+function makeField(kind, input, sugg, picked){
+  var f = {kind:kind, input:input, sugg:sugg, picked:picked, place:null, marker:null, token:null};
+  var timer = null, seq = 0;
   function show(items, loading){
-    suggEl.innerHTML = '';
-    if(loading){var d = document.createElement('div'); d.className='none'; d.textContent='Searching...'; suggEl.appendChild(d);}
-    else if(!items.length){var d2 = document.createElement('div'); d2.className='none'; d2.textContent='No match. Try adding an area, e.g. "Ikeja, Lagos".'; suggEl.appendChild(d2);}
+    sugg.innerHTML = '';
+    if(loading){var d = document.createElement('div'); d.className = 'none'; d.textContent = 'Searching...'; sugg.appendChild(d);}
+    else if(!items.length){var d2 = document.createElement('div'); d2.className = 'none'; d2.textContent = 'No match. Try adding an area, e.g. "Ikeja, Lagos", or use the map.'; sugg.appendChild(d2);}
     items.forEach(function(it){
       var d3 = document.createElement('div'); d3.textContent = it.name;
       d3.addEventListener('mousedown', function(e){e.preventDefault();});
       d3.addEventListener('click', function(){
-        obj.place = it; inputEl.value = it.name.split(',').slice(0,2).join(',').trim();
-        pickedEl.textContent = 'Selected: ' + it.name;
-        suggEl.style.display = 'none'; if(onPick) onPick();
+        sugg.style.display = 'none';
+        setNote(f, 'Looking up the place...', false);
+        (it.resolve ? it.resolve() : Promise.resolve(it)).then(function(pl){
+          applyPlace(f, pl, {fit:true});
+        }).catch(function(){setNote(f, 'Could not get that place. Please pick another suggestion.', true);});
       });
-      suggEl.appendChild(d3);
+      sugg.appendChild(d3);
     });
-    suggEl.style.display = 'block';
+    sugg.style.display = 'block';
+  }
+  // Coordinates, Google Maps links and plus codes are handled here without any web lookup
+  function handlePasted(){
+    var parsed = parseLocationInput(input.value);
+    if(!parsed) return false;
+    clearTimeout(timer); seq++; sugg.style.display = 'none';
+    if(parsed.error){f.place = null; syncMarkers(false); clearRoute(); setNote(f, parsed.message, true); return true;}
+    setPin(f, parsed.lat, parsed.lon, {fit:true});
+    return true;
   }
   function doSearch(){
-    var q = inputEl.value.trim();
-    if(q.length < 3){suggEl.style.display='none'; return;}
+    if(handlePasted()) return;
+    var q = input.value.trim();
+    if(q.length < 3){sugg.style.display = 'none'; return;}
     var my = ++seq; show([], true);
-    searchPlaces(q).then(function(items){if(my === seq) show(items,false);}).catch(function(){
-      if(my === seq){suggEl.innerHTML=''; var d=document.createElement('div'); d.className='none'; d.textContent='Place search is not reachable right now. Try again shortly.'; suggEl.appendChild(d);}
+    var stale = function(){return my !== seq;};
+    searchPlaces(q, f, stale).then(function(items){
+      if(my === seq && items) show(items, false);
+    }).catch(function(){
+      if(my === seq){sugg.innerHTML = ''; var d = document.createElement('div'); d.className = 'none'; d.textContent = 'Place search is not reachable right now. Try again shortly, or use the map.'; sugg.appendChild(d);}
     });
   }
-  inputEl.addEventListener('input', function(){
-    obj.place = null; pickedEl.textContent = '';
-    clearTimeout(timer); timer = setTimeout(doSearch, 800);
+  input.addEventListener('input', function(){
+    if(f.place){f.place = null; syncMarkers(false); clearRoute();}
+    setNote(f, '', false); seq++;
+    clearTimeout(timer); timer = setTimeout(doSearch, useGoogle() ? GOOGLE_DEBOUNCE_MS : DEBOUNCE_MS);
   });
-  inputEl.addEventListener('keydown', function(e){if(e.key === 'Enter'){e.preventDefault(); clearTimeout(timer); doSearch();}});
-  inputEl.addEventListener('blur', function(){setTimeout(function(){suggEl.style.display='none';}, 200);});
-  inputEl.addEventListener('focus', function(){if(suggEl.children.length && !obj.place) suggEl.style.display='block';});
-  return obj;
+  input.addEventListener('paste', function(){
+    setTimeout(function(){handlePasted();}, 0);
+  });
+  input.addEventListener('keydown', function(e){if(e.key === 'Enter'){e.preventDefault(); clearTimeout(timer); doSearch();}});
+  input.addEventListener('blur', function(){setTimeout(function(){sugg.style.display = 'none';}, 200);});
+  input.addEventListener('focus', function(){
+    setActive(f);
+    if(sugg.children.length && !f.place) sugg.style.display = 'block';
+  });
+  return f;
 }
 
-var destObj = makePlaceInput(document.getElementById('dest'), document.getElementById('sugg-dest'), document.getElementById('picked-dest'));
+var destField = makeField('dest', document.getElementById('dest'), document.getElementById('sugg-dest'), document.getElementById('picked-dest'));
+fields.push(destField);
+document.getElementById('pin-dest').addEventListener('click', function(){setActive(destField, true);});
 
 var pickupsEl = document.getElementById('pickups');
 function addPickup(){
   if(state.pickups.length >= MAX_PICKUPS) return;
   var n = state.pickups.length + 1;
   var wrap = document.createElement('div');
-  wrap.innerHTML = '<label>Pickup point ' + n + '</label><div class="row"><div class="field"><input type="text" placeholder="e.g. Lekki Phase 1" autocomplete="off"><div class="sugg"></div></div><button class="rm" title="Remove">Remove</button></div><div class="picked"></div>';
+  wrap.innerHTML = '<label>Pickup point ' + n + '</label><div class="row"><div class="field"><input type="text" placeholder="e.g. Lekki Phase 1, or paste coordinates" autocomplete="off"><div class="sugg"></div></div><button class="pin" type="button" title="Set this point on the map">Map</button><button class="rm" type="button" title="Remove">Remove</button></div><div class="picked"></div>';
   var input = wrap.querySelector('input'), sugg = wrap.querySelector('.sugg'), picked = wrap.querySelector('.picked');
-  var obj = makePlaceInput(input, sugg, picked);
-  var item = {el:wrap, obj:obj, input:input};
+  var item = makeField('pickup', input, sugg, picked);
+  item.el = wrap;
+  wrap.querySelector('.pin').addEventListener('click', function(){setActive(item, true);});
   wrap.querySelector('.rm').addEventListener('click', function(){
-    if(state.pickups.length <= 1){input.value=''; obj.place=null; picked.textContent=''; return;}
-    state.pickups.splice(state.pickups.indexOf(item),1); pickupsEl.removeChild(wrap); relabel();
+    if(state.pickups.length <= 1){
+      input.value = ''; item.place = null; setNote(item, '', false); syncMarkers(false); clearRoute(); return;
+    }
+    state.pickups.splice(state.pickups.indexOf(item), 1);
+    fields.splice(fields.indexOf(item), 1);
+    if(item.marker && map){map.removeLayer(item.marker); item.marker = null;}
+    pickupsEl.removeChild(wrap); clearRoute();
+    if(activeField === item) activeField = destField;
+    relabel(); syncMarkers(false);
   });
-  state.pickups.push(item); pickupsEl.appendChild(wrap); relabel();
+  state.pickups.push(item); fields.push(item); pickupsEl.appendChild(wrap); relabel();
 }
 function relabel(){
   state.pickups.forEach(function(p,i){p.el.querySelector('label').textContent = 'Pickup point ' + (i+1);});
   document.getElementById('addPickup').style.display = state.pickups.length >= MAX_PICKUPS ? 'none' : '';
+  rebuildTargets();
 }
-document.getElementById('addPickup').addEventListener('click', addPickup);
+document.getElementById('addPickup').addEventListener('click', function(){addPickup(); syncMarkers(false);});
+initMap();
 addPickup();
+setActive(destField);
 
 function setMode(s){
   document.getElementById('seats').value = s;
@@ -265,22 +623,23 @@ document.getElementById('go').addEventListener('click', function(){
   msg('');
   var p = params();
   if(!p){msg('Please check the pricing inputs. They must be numbers, and seats must be at least 1.'); return;}
-  if(!destObj.place){msg('Please type a destination and pick one of the suggestions.'); return;}
-  var picks = state.pickups.filter(function(x){return x.obj.place;});
-  if(!picks.length){msg('Please type at least one pickup point and pick one of the suggestions.'); return;}
-  var unpicked = state.pickups.filter(function(x){return x.input.value.trim() && !x.obj.place;});
-  if(unpicked.length){msg('One pickup has text but no selected place. Pick a suggestion or clear it.'); return;}
+  if(!destField.place){msg('Please set a destination: pick a suggestion, paste coordinates or a Google Maps link, or tap the map.'); return;}
+  var picks = state.pickups.filter(function(x){return x.place;});
+  if(!picks.length){msg('Please set at least one pickup point: pick a suggestion, paste coordinates or a Google Maps link, or tap the map.'); return;}
+  var unpicked = state.pickups.filter(function(x){return x.input.value.trim() && !x.place;});
+  if(unpicked.length){msg('One pickup has text but no selected place. Pick a suggestion, paste coordinates, or clear it.'); return;}
   var withReturn = document.getElementById('ret').checked;
-  var dest = destObj.place;
+  var dest = destField.place;
   btn.disabled = true; btn.textContent = 'Working...'; out.innerHTML = '';
 
   var jobs = picks.map(function(x){
-    var a = route([x.obj.place, dest]);
-    var b = withReturn ? route([dest, x.obj.place]) : Promise.resolve(null);
-    return Promise.all([a,b]).then(function(r){return {place:x.obj.place, out:r[0], back:r[1]};});
+    var a = route([x.place, dest]);
+    var b = withReturn ? route([dest, x.place]) : Promise.resolve(null);
+    return Promise.all([a,b]).then(function(r){return {place:x.place, out:r[0], back:r[1]};});
   });
-  var pts = picks.map(function(x){return x.obj.place;});
-  var driverOut = route(pts.concat([dest]));
+  var pts = picks.map(function(x){return x.place;});
+  var lineSeq = routeSeq;
+  var driverOut = routeWithLine(pts.concat([dest])).then(function(res){drawRoute(res.line, lineSeq); return res.km;});
   var driverBack = withReturn ? route([dest].concat(pts.slice().reverse())) : Promise.resolve(null);
 
   Promise.all([Promise.all(jobs), driverOut, driverBack]).then(function(r){
